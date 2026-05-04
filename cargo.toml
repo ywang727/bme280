@@ -1,0 +1,4 @@
+[workspace]
+members = ["bme280_driver", "bme280_app"]
+
+resolver = "2"
