@@ -7,7 +7,7 @@ High-performance `no_std` Rust driver for BME280 sensors. It leverages the Types
 - **Async First**: Native support for `embedded-hal-async` 1.0.
 - **Typestate Safety**: Compile-time enforcement of sensor states (`Sleep`, `Normal`, `Forced`).
 - **Dual Interface**: Seamless support for both I2C and SPI (with automatic CS management).
-- **Robustness**: Built-in 150ms safety timeouts for measurements.
+- **Robustness**: Built-in configurable safety timeouts for bus operations and a 10ms post-reset OTP reload guard.
 - **Fluent API**: Modern `Bme280Builder` for elegant configuration.
 - **no_std**: Zero-cost abstractions suitable for bare-metal development.
 
@@ -16,16 +16,20 @@ High-performance `no_std` Rust driver for BME280 sensors. It leverages the Types
 ### I2C Example (Async)
 
 ```rust
-use bme280_driver::{Bme280Builder, OsrsT, FilterMode, TsbMode};
+use bme280_driver::{Bme280Builder, OsrsT, OsrsP, OsrsH, FilterMode, TsbMode};
+use embassy_time::Duration;
 
 // Initialize via Builder
 let mut bme = Bme280Builder::new()
-    .osrs_t(OsrsT::X16)
-    .filter(FilterMode::X4)
-    .standby(TsbMode::Ms10)
-    .build_i2c(i2c_bus, 0x76);
+    .oversampling_temp(OsrsT::X2)
+    .oversampling_pressure(OsrsP::X16)
+    .oversampling_humidity(OsrsH::X1)
+    .filter(FilterMode::F4)
+    .standby(TsbMode::SB125)
+    .timeout(Duration::from_millis(100))
+    .build_i2c(i2c_bus, 0x77);
 
-// Initialize hardware
+// Initialize hardware (includes reset and loading OTP calibration registers)
 bme.init().await?;
 
 // Switch to Normal Mode for continuous sampling
@@ -43,6 +47,26 @@ let mut bme_forced = bme.into_forced_mode().await?;
 let (temp, press, hum) = bme_forced.read_once().await?;
 ```
 
+## Running Examples & Tests
+
+The workspace contains two run targets:
+
+### 1. Host Simulation & Unit Tests
+You can compile and run a simulated I2C sensor target on your host PC:
+```bash
+# Run host mock example
+cargo host-run
+
+# Run comprehensive unit tests
+cargo test --no-default-features --features "i2c spi async embassy-time/std embassy-time/generic-queue-64"
+```
+
+### 2. Embedded Target (nRF52840 DK)
+To build and run the driver on an actual nRF52840 DK board (using embassy-nrf's TWIM peripheral):
+```bash
+cargo run -p bme280_app --bin nrf52840
+```
+
 ## Installation
 
 Add this to your `Cargo.toml`:
@@ -54,4 +78,5 @@ bme280_driver = { git = "git@github.com:ywang727/bme280.git" }
 
 ## License
 - MIT license
+
 
