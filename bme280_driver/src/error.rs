@@ -10,6 +10,8 @@ pub enum I2cError {
     Write,
     #[error("Interrupt pin error")]
     Interrupt,
+    #[error("I2C timeout")]
+    Timeout,
 }
 
 #[derive(Debug, Error)]
@@ -22,6 +24,8 @@ pub enum SpiError {
     Write,
     #[error("Interrupt pin error")]
     Interrupt,
+    #[error("SPI timeout")]
+    Timeout,
 }
 
 #[derive(Debug, Error)]

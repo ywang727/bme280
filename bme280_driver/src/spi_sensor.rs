@@ -11,6 +11,8 @@ pub use embedded_hal::spi::SpiDevice as SpiDeviceTrait;
 #[cfg(feature = "async")]
 pub use embedded_hal_async::spi::SpiDevice as SpiDeviceTrait;
 
+const SPI_TIMEOUT_DEFAULT: Duration = Duration::from_millis(70);
+
 #[derive(Debug)]
 pub struct Bme280Spi<SPI, MODE = Sleep> {
     pub(crate) spi: SPI,
@@ -18,6 +20,7 @@ pub struct Bme280Spi<SPI, MODE = Sleep> {
     pub(crate) cal1: Option<CalibrationData1>,
     pub(crate) cal2: Option<CalibrationData2>,
     _mode: PhantomData<MODE>,
+    pub(crate) timeout: embassy_time::Duration,
 }
 
 impl<SPI, MODE> Bme280Spi<SPI, MODE>
@@ -27,22 +30,31 @@ where
 {
     pub async fn read_reg(&mut self, reg: u8, buf: &mut [u8]) -> Result<()> {
         let addr = reg | 0x80;
-        self.spi
-            .transaction(&mut [
-                embedded_hal::spi::Operation::Write(&[addr]),
-                embedded_hal::spi::Operation::Read(buf),
-            ])
+        let addr_buf = [addr];
+        let mut operations = [
+            embedded_hal::spi::Operation::Write(&addr_buf),
+            embedded_hal::spi::Operation::Read(buf),
+        ];
+        let fut = self.spi.transaction(&mut operations);
+
+        embassy_time::with_timeout(self.timeout, fut)
             .await
-            .map_err(|_| Error::Spi(SpiError::Read))
+            .map_err(|_| Error::Spi(SpiError::Timeout))?
+            .map_err(|_| Error::Spi(SpiError::Read))?;
+        trace!("BME280: read reg 0x{:02x}  len = {}", reg, buf.len());
+        Ok(())
     }
 
     pub async fn write_reg(&mut self, reg: u8, val: u8) -> Result<()> {
         trace!("BME280 SPI: write reg 0x{:02x} = 0x{:02x}", reg, val);
         let addr = reg & 0x7F;
-        self.spi
-            .write(&[addr, val])
+        let write_buf = [addr, val];
+        let fut = self.spi.write(&write_buf);
+        embassy_time::with_timeout(self.timeout, fut)
             .await
-            .map_err(|_| Error::Spi(SpiError::Write))
+            .map_err(|_| Error::Spi(SpiError::Timeout))?
+            .map_err(|_| Error::Spi(SpiError::Write))?;
+        Ok(())
     }
 
     pub async fn reset(&mut self) -> Result<()> {
@@ -172,6 +184,7 @@ where
             cal1: None,
             cal2: None,
             _mode: PhantomData,
+            timeout: SPI_TIMEOUT_DEFAULT,
         }
     }
 
@@ -184,6 +197,7 @@ where
             cal1: self.cal1,
             cal2: self.cal2,
             _mode: PhantomData,
+            timeout: self.timeout,
         })
     }
 
@@ -197,6 +211,7 @@ where
             cal1: self.cal1,
             cal2: self.cal2,
             _mode: PhantomData,
+            timeout: self.timeout,
         })
     }
 }
@@ -222,6 +237,7 @@ where
             cal1: self.cal1,
             cal2: self.cal2,
             _mode: PhantomData,
+            timeout: self.timeout,
         })
     }
 }
@@ -258,5 +274,223 @@ where
         let meas = MeasurementData(u64::from_le_bytes(data));
         let (cal1, cal2) = self.get_cal_refs().await?;
         Self::calculate_compensation(meas, cal1, cal2)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use embedded_hal_mock::eh1::spi::{Mock as SpiMock, Transaction as SpiTrans};
+    use futures::executor::block_on;
+
+    #[test]
+    fn test_read_reg() {
+        let expectations = [
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![0xD0 | 0x80]),
+            SpiTrans::read_vec(vec![0x60]),
+            SpiTrans::transaction_end(),
+        ];
+        let spi = SpiMock::new(&expectations);
+        let mut sensor = Bme280Spi::new(spi);
+
+        let mut buf = [0u8; 1];
+        block_on(sensor.read_reg(0xD0, &mut buf)).unwrap();
+        assert_eq!(buf[0], 0x60);
+
+        sensor.spi.done();
+    }
+
+    #[test]
+    fn test_write_reg() {
+        let expectations = [
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![0xE0 & 0x7F, 0xB6]),
+            SpiTrans::transaction_end(),
+        ];
+        let spi = SpiMock::new(&expectations);
+        let mut sensor = Bme280Spi::new(spi);
+
+        block_on(sensor.write_reg(0xE0, 0xB6)).unwrap();
+
+        sensor.spi.done();
+    }
+
+    #[test]
+    fn test_init() {
+        let expectations = [
+            // reset
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_RESET & 0x7F, 0xB6]),
+            SpiTrans::transaction_end(),
+            // get_calibration1_data (26 bytes)
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![CALIB1_TEMP_START | 0x80]),
+            SpiTrans::read_vec(vec![0; 26]),
+            SpiTrans::transaction_end(),
+            // get_calibration2_data (16 bytes)
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![CALIB2_HUM_START | 0x80]),
+            SpiTrans::read_vec(vec![0; 16]),
+            SpiTrans::transaction_end(),
+            // apply_config
+            // REG_CTRL_HUM
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CTRL_HUM & 0x7F, 0x01]),
+            SpiTrans::transaction_end(),
+            // REG_CONFIG
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CONFIG & 0x7F, 0x40]),
+            SpiTrans::transaction_end(),
+            // REG_CTRL_MEAS
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CTRL_MEAS & 0x7F, 0x24]),
+            SpiTrans::transaction_end(),
+        ];
+        let spi = SpiMock::new(&expectations);
+        let mut sensor = Bme280Spi::new(spi);
+
+        block_on(sensor.init()).unwrap();
+
+        sensor.spi.done();
+    }
+
+    #[test]
+    fn test_normal_mode_workflow() {
+        let calibration1_data = vec![1; 26];
+        let calibration2_data = vec![1; 16];
+        let all_data = vec![0x80, 0x80, 0x00, 0x80, 0x80, 0x00, 0x80, 0x80];
+
+        let expectations = [
+            // 1. init
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_RESET & 0x7F, 0xB6]),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![CALIB1_TEMP_START | 0x80]),
+            SpiTrans::read_vec(calibration1_data),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![CALIB2_HUM_START | 0x80]),
+            SpiTrans::read_vec(calibration2_data),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CTRL_HUM & 0x7F, 0x01]),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CONFIG & 0x7F, 0x40]),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CTRL_MEAS & 0x7F, 0x24]),
+            SpiTrans::transaction_end(),
+
+            // 2. into_normal_mode
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CTRL_HUM & 0x7F, 0x01]),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CONFIG & 0x7F, 0x40]),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CTRL_MEAS & 0x7F, 0x27]),
+            SpiTrans::transaction_end(),
+
+            // 3. read_all
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_ALLDATA_START | 0x80]),
+            SpiTrans::read_vec(all_data),
+            SpiTrans::transaction_end(),
+
+            // 4. stop (transition back to sleep)
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CTRL_HUM & 0x7F, 0x01]),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CONFIG & 0x7F, 0x40]),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CTRL_MEAS & 0x7F, 0x24]),
+            SpiTrans::transaction_end(),
+        ];
+
+        let spi = SpiMock::new(&expectations);
+        let mut sensor = Bme280Spi::new(spi);
+
+        block_on(sensor.init()).unwrap();
+        let mut normal_sensor = block_on(sensor.into_normal_mode()).unwrap();
+        let (temp, _press, _hum) = block_on(normal_sensor.read_all()).unwrap();
+
+        assert!(temp > -100.0 && temp < 100.0);
+
+        let mut sleep_sensor = block_on(normal_sensor.stop()).unwrap();
+        sleep_sensor.spi.done();
+    }
+
+    #[test]
+    fn test_forced_mode_workflow() {
+        let calibration1_data = vec![1; 26];
+        let calibration2_data = vec![1; 16];
+        let all_data = vec![0x80, 0x80, 0x00, 0x80, 0x80, 0x00, 0x80, 0x80];
+
+        let expectations = [
+            // 1. init
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_RESET & 0x7F, 0xB6]),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![CALIB1_TEMP_START | 0x80]),
+            SpiTrans::read_vec(calibration1_data),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![CALIB2_HUM_START | 0x80]),
+            SpiTrans::read_vec(calibration2_data),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CTRL_HUM & 0x7F, 0x01]),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CONFIG & 0x7F, 0x40]),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CTRL_MEAS & 0x7F, 0x24]),
+            SpiTrans::transaction_end(),
+
+            // 2. into_forced_mode
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CTRL_HUM & 0x7F, 0x01]),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CONFIG & 0x7F, 0x40]),
+            SpiTrans::transaction_end(),
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CTRL_MEAS & 0x7F, 0x24]),
+            SpiTrans::transaction_end(),
+
+            // 3. read_once
+            // write CTRL_MEAS with mode = Forced (1) -> 0x24 | 0x01 = 0x25
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_CTRL_MEAS & 0x7F, 0x25]),
+            SpiTrans::transaction_end(),
+            // status check: return measuring = 0 (bit 3 is 0)
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_STATUS | 0x80]),
+            SpiTrans::read_vec(vec![0x00]),
+            SpiTrans::transaction_end(),
+            // read_all_data
+            SpiTrans::transaction_start(),
+            SpiTrans::write_vec(vec![REG_ALLDATA_START | 0x80]),
+            SpiTrans::read_vec(all_data),
+            SpiTrans::transaction_end(),
+        ];
+
+        let spi = SpiMock::new(&expectations);
+        let mut sensor = Bme280Spi::new(spi);
+
+        block_on(sensor.init()).unwrap();
+        let mut forced_sensor = block_on(sensor.into_forced_mode()).unwrap();
+        let (temp, _press, _hum) = block_on(forced_sensor.read_once()).unwrap();
+
+        assert!(temp > -100.0 && temp < 100.0);
+        forced_sensor.spi.done();
     }
 }

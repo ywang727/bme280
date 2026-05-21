@@ -11,6 +11,8 @@ pub use embedded_hal::i2c::I2c as I2cTrait;
 #[cfg(feature = "async")]
 pub use embedded_hal_async::i2c::I2c as I2cTrait;
 
+const I2C_TIMEOUT_DEFAULT: Duration = Duration::from_millis(70);
+
 #[derive(Debug)]
 pub struct Bme280I2C<I2C, MODE = Sleep> {
     pub(crate) i2c: I2C,
@@ -19,6 +21,7 @@ pub struct Bme280I2C<I2C, MODE = Sleep> {
     pub(crate) cal1: Option<CalibrationData1>,
     pub(crate) cal2: Option<CalibrationData2>,
     _mode: PhantomData<MODE>,
+    pub(crate) timeout: embassy_time::Duration,
 }
 
 impl<I2C, MODE> Bme280I2C<I2C, MODE>
@@ -27,19 +30,27 @@ where
     MODE: SensorState,
 {
     pub async fn read_reg(&mut self, reg: u8, buf: &mut [u8]) -> Result<()> {
-        self.i2c
-            .write_read(self.addr, &[reg], buf)
+        let reg_buf = [reg];
+        let fut = self.i2c.write_read(self.addr, &reg_buf, buf);
+        embassy_time::with_timeout(self.timeout, fut)
             .await
-            .map_err(|_| Error::I2c(I2cError::Read))
+            .map_err(|_| Error::I2c(I2cError::Timeout))?
+            .map_err(|_| Error::I2c(I2cError::Read))?;
+
+        trace!("BME280: read reg 0x{:02x}  len = {}", reg, buf.len());
+        Ok(())
     }
 
     pub async fn write_reg(&mut self, reg: u8, val: u8) -> Result<()> {
         trace!("BME280: write reg 0x{:02x} = 0x{:02x}", reg, val);
         let buf = [reg, val];
-        self.i2c
-            .write(self.addr, &buf)
+        let fut = self.i2c.write(self.addr, &buf);
+        embassy_time::with_timeout(self.timeout, fut)
             .await
-            .map_err(|_| Error::I2c(I2cError::Write))
+            .map_err(|_| Error::I2c(I2cError::Timeout))?
+            .map_err(|_| Error::I2c(I2cError::Write))?;
+
+        Ok(())
     }
 
     pub async fn reset(&mut self) -> Result<()> {
@@ -170,6 +181,7 @@ where
             cal1: None,
             cal2: None,
             _mode: PhantomData,
+            timeout: I2C_TIMEOUT_DEFAULT,
         }
     }
 
@@ -183,6 +195,7 @@ where
             cal1: self.cal1,
             cal2: self.cal2,
             _mode: PhantomData,
+            timeout: self.timeout,
         })
     }
 
@@ -197,6 +210,7 @@ where
             cal1: self.cal1,
             cal2: self.cal2,
             _mode: PhantomData,
+            timeout: self.timeout,
         })
     }
 }
@@ -224,6 +238,7 @@ where
             cal1: self.cal1,
             cal2: self.cal2,
             _mode: PhantomData,
+            timeout: self.timeout,
         })
     }
 }
@@ -261,5 +276,142 @@ where
         let (cal1, cal2) = self.get_cal_refs().await?;
 
         Self::calculate_compensation(meas, cal1, cal2)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use embedded_hal_mock::eh1::i2c::{Mock as I2cMock, Transaction as I2cTrans};
+    use futures::executor::block_on;
+
+    const ADDR: u8 = 0x76;
+
+    #[test]
+    fn test_read_reg() {
+        let expectations = [I2cTrans::write_read(ADDR, vec![0xD0], vec![0x60])];
+        let i2c = I2cMock::new(&expectations);
+        let mut sensor = Bme280I2C::new(i2c, ADDR);
+
+        let mut buf = [0u8; 1];
+        block_on(sensor.read_reg(0xD0, &mut buf)).unwrap();
+        assert_eq!(buf[0], 0x60);
+
+        sensor.i2c.done();
+    }
+
+    #[test]
+    fn test_write_reg() {
+        let expectations = [I2cTrans::write(ADDR, vec![0xE0, 0xB6])];
+        let i2c = I2cMock::new(&expectations);
+        let mut sensor = Bme280I2C::new(i2c, ADDR);
+
+        block_on(sensor.write_reg(0xE0, 0xB6)).unwrap();
+
+        sensor.i2c.done();
+    }
+
+    #[test]
+    fn test_init() {
+        let expectations = [
+            // reset
+            I2cTrans::write(ADDR, vec![REG_RESET, 0xB6]),
+            // get_calibration1_data (26 bytes)
+            I2cTrans::write_read(ADDR, vec![CALIB1_TEMP_START], vec![0; 26]),
+            // get_calibration2_data (16 bytes)
+            I2cTrans::write_read(ADDR, vec![CALIB2_HUM_START], vec![0; 16]),
+            // apply_config
+            // REG_CTRL_HUM
+            I2cTrans::write(ADDR, vec![REG_CTRL_HUM, 0x01]),
+            // REG_CONFIG
+            I2cTrans::write(ADDR, vec![REG_CONFIG, 0x40]),
+            // REG_CTRL_MEAS
+            I2cTrans::write(ADDR, vec![REG_CTRL_MEAS, 0x24]),
+        ];
+        let i2c = I2cMock::new(&expectations);
+        let mut sensor = Bme280I2C::new(i2c, ADDR);
+
+        block_on(sensor.init()).unwrap();
+
+        sensor.i2c.done();
+    }
+
+    #[test]
+    fn test_normal_mode_workflow() {
+        let calibration1_data = vec![1; 26];
+        let calibration2_data = vec![1; 16];
+        let all_data = vec![0x80, 0x80, 0x00, 0x80, 0x80, 0x00, 0x80, 0x80];
+
+        let expectations = [
+            // 1. init
+            I2cTrans::write(ADDR, vec![REG_RESET, 0xB6]),
+            I2cTrans::write_read(ADDR, vec![CALIB1_TEMP_START], calibration1_data),
+            I2cTrans::write_read(ADDR, vec![CALIB2_HUM_START], calibration2_data),
+            I2cTrans::write(ADDR, vec![REG_CTRL_HUM, 0x01]),
+            I2cTrans::write(ADDR, vec![REG_CONFIG, 0x40]),
+            I2cTrans::write(ADDR, vec![REG_CTRL_MEAS, 0x24]),
+
+            // 2. into_normal_mode
+            I2cTrans::write(ADDR, vec![REG_CTRL_HUM, 0x01]),
+            I2cTrans::write(ADDR, vec![REG_CONFIG, 0x40]),
+            I2cTrans::write(ADDR, vec![REG_CTRL_MEAS, 0x27]),
+
+            // 3. read_all
+            I2cTrans::write_read(ADDR, vec![REG_ALLDATA_START], all_data),
+
+            // 4. stop (transition back to sleep)
+            I2cTrans::write(ADDR, vec![REG_CTRL_HUM, 0x01]),
+            I2cTrans::write(ADDR, vec![REG_CONFIG, 0x40]),
+            I2cTrans::write(ADDR, vec![REG_CTRL_MEAS, 0x24]),
+        ];
+
+        let i2c = I2cMock::new(&expectations);
+        let mut sensor = Bme280I2C::new(i2c, ADDR);
+
+        block_on(sensor.init()).unwrap();
+        let mut normal_sensor = block_on(sensor.into_normal_mode()).unwrap();
+        let (temp, _press, _hum) = block_on(normal_sensor.read_all()).unwrap();
+        
+        assert!(temp > -100.0 && temp < 100.0);
+        
+        let mut sleep_sensor = block_on(normal_sensor.stop()).unwrap();
+        sleep_sensor.i2c.done();
+    }
+
+    #[test]
+    fn test_forced_mode_workflow() {
+        let calibration1_data = vec![1; 26];
+        let calibration2_data = vec![1; 16];
+        let all_data = vec![0x80, 0x80, 0x00, 0x80, 0x80, 0x00, 0x80, 0x80];
+
+        let expectations = [
+            // 1. init
+            I2cTrans::write(ADDR, vec![REG_RESET, 0xB6]),
+            I2cTrans::write_read(ADDR, vec![CALIB1_TEMP_START], calibration1_data),
+            I2cTrans::write_read(ADDR, vec![CALIB2_HUM_START], calibration2_data),
+            I2cTrans::write(ADDR, vec![REG_CTRL_HUM, 0x01]),
+            I2cTrans::write(ADDR, vec![REG_CONFIG, 0x40]),
+            I2cTrans::write(ADDR, vec![REG_CTRL_MEAS, 0x24]),
+
+            // 2. into_forced_mode
+            I2cTrans::write(ADDR, vec![REG_CTRL_HUM, 0x01]),
+            I2cTrans::write(ADDR, vec![REG_CONFIG, 0x40]),
+            I2cTrans::write(ADDR, vec![REG_CTRL_MEAS, 0x24]),
+
+            // 3. read_once
+            I2cTrans::write(ADDR, vec![REG_CTRL_MEAS, 0x25]),
+            I2cTrans::write_read(ADDR, vec![REG_STATUS], vec![0x00]),
+            I2cTrans::write_read(ADDR, vec![REG_ALLDATA_START], all_data),
+        ];
+
+        let i2c = I2cMock::new(&expectations);
+        let mut sensor = Bme280I2C::new(i2c, ADDR);
+
+        block_on(sensor.init()).unwrap();
+        let mut forced_sensor = block_on(sensor.into_forced_mode()).unwrap();
+        let (temp, _press, _hum) = block_on(forced_sensor.read_once()).unwrap();
+
+        assert!(temp > -100.0 && temp < 100.0);
+        forced_sensor.i2c.done();
     }
 }
