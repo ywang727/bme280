@@ -28,6 +28,10 @@ where
     SPI: SpiDeviceTrait,
     MODE: SensorState,
 {
+    pub fn into_inner(self) -> SPI {
+        self.spi
+    }
+
     pub async fn read_reg(&mut self, reg: u8, buf: &mut [u8]) -> Result<()> {
         let addr = reg | 0x80;
         let addr_buf = [addr];
@@ -41,7 +45,10 @@ where
             .await
             .map_err(|_| Error::Spi(SpiError::Timeout))?
             .map_err(|_| Error::Spi(SpiError::Read))?;
-        trace!("BME280: read reg 0x{:02x}  len = {}", reg, buf.len());
+        #[cfg(feature = "defmt")]
+        trace!("BME280: read reg 0x{:02x}  buf = {=[u8]:#04x}", reg, buf);
+        #[cfg(not(feature = "defmt"))]
+        trace!("BME280: read reg 0x{:02x}  buf = {:02x?}", reg, buf);
         Ok(())
     }
 
@@ -69,6 +76,7 @@ where
 
     pub async fn init(&mut self) -> Result<()> {
         self.reset().await?;
+        Timer::after(Duration::from_millis(10)).await;
         self.cal1 = Some(self.get_calibration1_data().await?);
         self.cal2 = Some(self.get_calibration2_data().await?);
         self.apply_config().await?;

@@ -29,6 +29,10 @@ where
     I2C: I2cTrait,
     MODE: SensorState,
 {
+    pub fn into_inner(self) -> I2C {
+        self.i2c
+    }
+
     pub async fn read_reg(&mut self, reg: u8, buf: &mut [u8]) -> Result<()> {
         let reg_buf = [reg];
         let fut = self.i2c.write_read(self.addr, &reg_buf, buf);
@@ -37,7 +41,10 @@ where
             .map_err(|_| Error::I2c(I2cError::Timeout))?
             .map_err(|_| Error::I2c(I2cError::Read))?;
 
-        trace!("BME280: read reg 0x{:02x}  len = {}", reg, buf.len());
+        #[cfg(feature = "defmt")]
+        trace!("BME280: read reg 0x{:02x}  buf = {=[u8]:#04x}", reg, buf);
+        #[cfg(not(feature = "defmt"))]
+        trace!("BME280: read reg 0x{:02x}  buf = {:02x?}", reg, buf);
         Ok(())
     }
 
@@ -65,6 +72,7 @@ where
 
     pub async fn init(&mut self) -> Result<()> {
         self.reset().await?;
+        Timer::after(Duration::from_millis(10)).await;
         self.cal1 = Some(self.get_calibration1_data().await?);
         self.cal2 = Some(self.get_calibration2_data().await?);
         self.apply_config().await?;
@@ -350,15 +358,12 @@ mod tests {
             I2cTrans::write(ADDR, vec![REG_CTRL_HUM, 0x01]),
             I2cTrans::write(ADDR, vec![REG_CONFIG, 0x40]),
             I2cTrans::write(ADDR, vec![REG_CTRL_MEAS, 0x24]),
-
             // 2. into_normal_mode
             I2cTrans::write(ADDR, vec![REG_CTRL_HUM, 0x01]),
             I2cTrans::write(ADDR, vec![REG_CONFIG, 0x40]),
             I2cTrans::write(ADDR, vec![REG_CTRL_MEAS, 0x27]),
-
             // 3. read_all
             I2cTrans::write_read(ADDR, vec![REG_ALLDATA_START], all_data),
-
             // 4. stop (transition back to sleep)
             I2cTrans::write(ADDR, vec![REG_CTRL_HUM, 0x01]),
             I2cTrans::write(ADDR, vec![REG_CONFIG, 0x40]),
@@ -371,9 +376,9 @@ mod tests {
         block_on(sensor.init()).unwrap();
         let mut normal_sensor = block_on(sensor.into_normal_mode()).unwrap();
         let (temp, _press, _hum) = block_on(normal_sensor.read_all()).unwrap();
-        
+
         assert!(temp > -100.0 && temp < 100.0);
-        
+
         let mut sleep_sensor = block_on(normal_sensor.stop()).unwrap();
         sleep_sensor.i2c.done();
     }
@@ -392,12 +397,10 @@ mod tests {
             I2cTrans::write(ADDR, vec![REG_CTRL_HUM, 0x01]),
             I2cTrans::write(ADDR, vec![REG_CONFIG, 0x40]),
             I2cTrans::write(ADDR, vec![REG_CTRL_MEAS, 0x24]),
-
             // 2. into_forced_mode
             I2cTrans::write(ADDR, vec![REG_CTRL_HUM, 0x01]),
             I2cTrans::write(ADDR, vec![REG_CONFIG, 0x40]),
             I2cTrans::write(ADDR, vec![REG_CTRL_MEAS, 0x24]),
-
             // 3. read_once
             I2cTrans::write(ADDR, vec![REG_CTRL_MEAS, 0x25]),
             I2cTrans::write_read(ADDR, vec![REG_STATUS], vec![0x00]),
