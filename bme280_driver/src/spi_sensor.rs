@@ -133,6 +133,14 @@ where
         cal1: &CalibrationData1,
         cal2: &CalibrationData2,
     ) -> Result<(f32, f32, f32)> {
+        let round_f32 = |val: f32| -> f32 {
+            if val >= 0.0 {
+                (val + 0.5) as i32 as f32
+            } else {
+                (val - 0.5) as i32 as f32
+            }
+        };
+
         let adc_t = meas.temperature() as f32;
         let var1_t = (adc_t / 16384.0 - (cal1.dig_t1() as f32) / 1024.0) * (cal1.dig_t2() as f32);
         let var2_t = ((adc_t / 131072.0 - (cal1.dig_t1() as f32) / 8192.0)
@@ -171,7 +179,11 @@ where
         h = h * (1.0 - cal1.dig_h1() as f32 * h / 524288.0);
         let humidity = h.clamp(0.0, 100.0);
 
-        Ok((temperature, pressure, humidity))
+        Ok((
+            round_f32(temperature * 100.0) / 100.0,
+            round_f32(pressure * 100.0) / 100.0,
+            round_f32(humidity * 100.0) / 100.0,
+        ))
     }
 }
 
