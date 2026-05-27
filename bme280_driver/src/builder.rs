@@ -7,21 +7,18 @@ use crate::states::Sleep;
 
 pub struct Bme280Builder {
     config: Config,
-    timeout: Option<embassy_time::Duration>,
 }
 
 impl Bme280Builder {
     pub fn new() -> Self {
         Self {
             config: Config::default(),
-            timeout: None,
         }
     }
 
     pub fn from_config(config: Config) -> Self {
         Self {
             config,
-            timeout: None,
         }
     }
 
@@ -60,21 +57,12 @@ impl Bme280Builder {
         self
     }
 
-    pub fn timeout(mut self, timeout: embassy_time::Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
     #[cfg(feature = "i2c")]
     pub fn build_i2c<I2C>(self, i2c: I2C, addr: u8) -> Bme280I2C<I2C, Sleep>
     where
         I2C: I2cTrait,
     {
-        let mut sensor = Bme280I2C::new_with_config(i2c, addr, self.config);
-        if let Some(timeout) = self.timeout {
-            sensor.timeout = timeout;
-        }
-        sensor
+        Bme280I2C::new_with_config(i2c, addr, self.config)
     }
 
     #[cfg(feature = "spi")]
@@ -82,11 +70,7 @@ impl Bme280Builder {
     where
         SPI: SpiDeviceTrait,
     {
-        let mut sensor = Bme280Spi::new_with_config(spi, self.config);
-        if let Some(timeout) = self.timeout {
-            sensor.timeout = timeout;
-        }
-        sensor
+        Bme280Spi::new_with_config(spi, self.config)
     }
 }
 
@@ -99,7 +83,6 @@ impl Default for Bme280Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use embassy_time::Duration;
 
     #[cfg(feature = "i2c")]
     #[test]
@@ -113,7 +96,6 @@ mod tests {
             .filter(FilterMode::F4)
             .standby(TsbMode::SB250)
             .spi3w(true)
-            .timeout(Duration::from_millis(200))
             .build_i2c(i2c, 0x76);
 
         assert_eq!(sensor.config.osrs_t, OsrsT::X2);
@@ -122,7 +104,7 @@ mod tests {
         assert_eq!(sensor.config.filter, FilterMode::F4);
         assert_eq!(sensor.config.standby, TsbMode::SB250);
         assert_eq!(sensor.config.spi3w, true);
-        assert_eq!(sensor.timeout, Duration::from_millis(200));
+        sensor.into_inner().done();
     }
 
     #[cfg(feature = "spi")]
@@ -137,7 +119,6 @@ mod tests {
             .filter(FilterMode::Off)
             .standby(TsbMode::SB1000)
             .spi3w(false)
-            .timeout(Duration::from_millis(50))
             .build_spi(spi);
 
         assert_eq!(sensor.config.osrs_t, OsrsT::X16);
@@ -146,6 +127,6 @@ mod tests {
         assert_eq!(sensor.config.filter, FilterMode::Off);
         assert_eq!(sensor.config.standby, TsbMode::SB1000);
         assert_eq!(sensor.config.spi3w, false);
-        assert_eq!(sensor.timeout, Duration::from_millis(50));
+        sensor.into_inner().done();
     }
 }

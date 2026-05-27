@@ -3,15 +3,11 @@ use crate::fmt::*;
 use crate::regs::*;
 use crate::states::*;
 use core::marker::PhantomData;
-use embassy_futures::select::{Either, select};
-use embassy_time::{Duration, Timer};
 
 #[cfg(not(feature = "async"))]
 pub use embedded_hal::i2c::I2c as I2cTrait;
 #[cfg(feature = "async")]
 pub use embedded_hal_async::i2c::I2c as I2cTrait;
-
-const I2C_TIMEOUT_DEFAULT: Duration = Duration::from_millis(70);
 
 #[derive(Debug)]
 pub struct Bme280I2C<I2C, MODE = Sleep> {
@@ -21,7 +17,6 @@ pub struct Bme280I2C<I2C, MODE = Sleep> {
     pub(crate) cal1: Option<CalibrationData1>,
     pub(crate) cal2: Option<CalibrationData2>,
     _mode: PhantomData<MODE>,
-    pub(crate) timeout: embassy_time::Duration,
 }
 
 impl<I2C, MODE> Bme280I2C<I2C, MODE>
@@ -35,10 +30,9 @@ where
 
     pub async fn read_reg(&mut self, reg: u8, buf: &mut [u8]) -> Result<()> {
         let reg_buf = [reg];
-        let fut = self.i2c.write_read(self.addr, &reg_buf, buf);
-        embassy_time::with_timeout(self.timeout, fut)
+        self.i2c
+            .write_read(self.addr, &reg_buf, buf)
             .await
-            .map_err(|_| Error::I2c(I2cError::Timeout))?
             .map_err(|_| Error::I2c(I2cError::Read))?;
 
         #[cfg(feature = "defmt")]
@@ -51,10 +45,9 @@ where
     pub async fn write_reg(&mut self, reg: u8, val: u8) -> Result<()> {
         trace!("BME280: write reg 0x{:02x} = 0x{:02x}", reg, val);
         let buf = [reg, val];
-        let fut = self.i2c.write(self.addr, &buf);
-        embassy_time::with_timeout(self.timeout, fut)
+        self.i2c
+            .write(self.addr, &buf)
             .await
-            .map_err(|_| Error::I2c(I2cError::Timeout))?
             .map_err(|_| Error::I2c(I2cError::Write))?;
 
         Ok(())
@@ -72,7 +65,13 @@ where
 
     pub async fn init(&mut self) -> Result<()> {
         self.reset().await?;
-        Timer::after(Duration::from_millis(10)).await;
+        loop {
+            let s = self.status().await?;
+            if s.im_update() == 0 {
+                break;
+            }
+            embassy_futures::yield_now().await;
+        }
         self.cal1 = Some(self.get_calibration1_data().await?);
         self.cal2 = Some(self.get_calibration2_data().await?);
         self.apply_config().await?;
@@ -189,7 +188,6 @@ where
             cal1: None,
             cal2: None,
             _mode: PhantomData,
-            timeout: I2C_TIMEOUT_DEFAULT,
         }
     }
 
@@ -203,7 +201,6 @@ where
             cal1: self.cal1,
             cal2: self.cal2,
             _mode: PhantomData,
-            timeout: self.timeout,
         })
     }
 
@@ -218,7 +215,6 @@ where
             cal1: self.cal1,
             cal2: self.cal2,
             _mode: PhantomData,
-            timeout: self.timeout,
         })
     }
 }
@@ -246,7 +242,6 @@ where
             cal1: self.cal1,
             cal2: self.cal2,
             _mode: PhantomData,
-            timeout: self.timeout,
         })
     }
 }
@@ -262,20 +257,12 @@ where
         meas_reg.set_mode(Mode::Forced);
         self.write_reg(REG_CTRL_MEAS, meas_reg.0).await?;
 
-        let timeout = Timer::after(Duration::from_millis(150));
-        let poller = async {
-            loop {
-                let s = self.status().await?;
-                if s.measuring() == 0 {
-                    break Ok(());
-                }
-                embassy_futures::yield_now().await;
+        loop {
+            let s = self.status().await?;
+            if s.measuring() == 0 {
+                break;
             }
-        };
-
-        match select(timeout, poller).await {
-            Either::First(_) => return Err(Error::Timeout),
-            Either::Second(res) => res?,
+            embassy_futures::yield_now().await;
         }
 
         let mut data = [0u8; 8];

@@ -3,15 +3,11 @@ use crate::fmt::*;
 use crate::regs::*;
 use crate::states::*;
 use core::marker::PhantomData;
-use embassy_futures::select::{Either, select};
-use embassy_time::{Duration, Timer};
 
 #[cfg(not(feature = "async"))]
 pub use embedded_hal::spi::SpiDevice as SpiDeviceTrait;
 #[cfg(feature = "async")]
 pub use embedded_hal_async::spi::SpiDevice as SpiDeviceTrait;
-
-const SPI_TIMEOUT_DEFAULT: Duration = Duration::from_millis(70);
 
 #[derive(Debug)]
 pub struct Bme280Spi<SPI, MODE = Sleep> {
@@ -20,7 +16,6 @@ pub struct Bme280Spi<SPI, MODE = Sleep> {
     pub(crate) cal1: Option<CalibrationData1>,
     pub(crate) cal2: Option<CalibrationData2>,
     _mode: PhantomData<MODE>,
-    pub(crate) timeout: embassy_time::Duration,
 }
 
 impl<SPI, MODE> Bme280Spi<SPI, MODE>
@@ -39,11 +34,9 @@ where
             embedded_hal::spi::Operation::Write(&addr_buf),
             embedded_hal::spi::Operation::Read(buf),
         ];
-        let fut = self.spi.transaction(&mut operations);
-
-        embassy_time::with_timeout(self.timeout, fut)
+        self.spi
+            .transaction(&mut operations)
             .await
-            .map_err(|_| Error::Spi(SpiError::Timeout))?
             .map_err(|_| Error::Spi(SpiError::Read))?;
         #[cfg(feature = "defmt")]
         trace!("BME280: read reg 0x{:02x}  buf = {=[u8]:#04x}", reg, buf);
@@ -56,10 +49,9 @@ where
         trace!("BME280 SPI: write reg 0x{:02x} = 0x{:02x}", reg, val);
         let addr = reg & 0x7F;
         let write_buf = [addr, val];
-        let fut = self.spi.write(&write_buf);
-        embassy_time::with_timeout(self.timeout, fut)
+        self.spi
+            .write(&write_buf)
             .await
-            .map_err(|_| Error::Spi(SpiError::Timeout))?
             .map_err(|_| Error::Spi(SpiError::Write))?;
         Ok(())
     }
@@ -76,7 +68,13 @@ where
 
     pub async fn init(&mut self) -> Result<()> {
         self.reset().await?;
-        Timer::after(Duration::from_millis(10)).await;
+        loop {
+            let s = self.status().await?;
+            if s.im_update() == 0 {
+                break;
+            }
+            embassy_futures::yield_now().await;
+        }
         self.cal1 = Some(self.get_calibration1_data().await?);
         self.cal2 = Some(self.get_calibration2_data().await?);
         self.apply_config().await?;
@@ -192,7 +190,6 @@ where
             cal1: None,
             cal2: None,
             _mode: PhantomData,
-            timeout: SPI_TIMEOUT_DEFAULT,
         }
     }
 
@@ -205,7 +202,6 @@ where
             cal1: self.cal1,
             cal2: self.cal2,
             _mode: PhantomData,
-            timeout: self.timeout,
         })
     }
 
@@ -219,7 +215,6 @@ where
             cal1: self.cal1,
             cal2: self.cal2,
             _mode: PhantomData,
-            timeout: self.timeout,
         })
     }
 }
@@ -245,7 +240,6 @@ where
             cal1: self.cal1,
             cal2: self.cal2,
             _mode: PhantomData,
-            timeout: self.timeout,
         })
     }
 }
@@ -261,20 +255,12 @@ where
         meas_reg.set_mode(Mode::Forced);
         self.write_reg(REG_CTRL_MEAS, meas_reg.0).await?;
 
-        let timeout = Timer::after(Duration::from_millis(150));
-        let poller = async {
-            loop {
-                let s = self.status().await?;
-                if s.measuring() == 0 {
-                    break Ok(());
-                }
-                embassy_futures::yield_now().await;
+        loop {
+            let s = self.status().await?;
+            if s.measuring() == 0 {
+                break;
             }
-        };
-
-        match select(timeout, poller).await {
-            Either::First(_) => return Err(Error::Timeout),
-            Either::Second(res) => res?,
+            embassy_futures::yield_now().await;
         }
 
         let mut data = [0u8; 8];
@@ -391,7 +377,6 @@ mod tests {
             SpiTrans::transaction_start(),
             SpiTrans::write_vec(vec![REG_CTRL_MEAS & 0x7F, 0x24]),
             SpiTrans::transaction_end(),
-
             // 2. into_normal_mode
             SpiTrans::transaction_start(),
             SpiTrans::write_vec(vec![REG_CTRL_HUM & 0x7F, 0x01]),
@@ -402,13 +387,11 @@ mod tests {
             SpiTrans::transaction_start(),
             SpiTrans::write_vec(vec![REG_CTRL_MEAS & 0x7F, 0x27]),
             SpiTrans::transaction_end(),
-
             // 3. read_all
             SpiTrans::transaction_start(),
             SpiTrans::write_vec(vec![REG_ALLDATA_START | 0x80]),
             SpiTrans::read_vec(all_data),
             SpiTrans::transaction_end(),
-
             // 4. stop (transition back to sleep)
             SpiTrans::transaction_start(),
             SpiTrans::write_vec(vec![REG_CTRL_HUM & 0x7F, 0x01]),
@@ -462,7 +445,6 @@ mod tests {
             SpiTrans::transaction_start(),
             SpiTrans::write_vec(vec![REG_CTRL_MEAS & 0x7F, 0x24]),
             SpiTrans::transaction_end(),
-
             // 2. into_forced_mode
             SpiTrans::transaction_start(),
             SpiTrans::write_vec(vec![REG_CTRL_HUM & 0x7F, 0x01]),
@@ -473,7 +455,6 @@ mod tests {
             SpiTrans::transaction_start(),
             SpiTrans::write_vec(vec![REG_CTRL_MEAS & 0x7F, 0x24]),
             SpiTrans::transaction_end(),
-
             // 3. read_once
             // write CTRL_MEAS with mode = Forced (1) -> 0x24 | 0x01 = 0x25
             SpiTrans::transaction_start(),

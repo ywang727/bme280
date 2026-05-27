@@ -40,7 +40,6 @@ async fn main(_spawner: Spawner) {
         .oversampling_humidity(OsrsH::X1)
         .filter(FilterMode::F4)
         .standby(TsbMode::SB125)
-        .timeout(Duration::from_millis(100))
         .build_i2c(i2c, BME280_ADDR);
 
     let mut sensor = sensor;

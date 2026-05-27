@@ -1,13 +1,13 @@
 # BME280 Rust Driver (Async & Typestate)
 
-High-performance `no_std` Rust driver for BME280 sensors. It leverages the Typestate pattern for compile-time safety, supporting both blocking and async (`embedded-hal` 1.0) operations. Features I2C/SPI compatibility, a fluent Builder API, and safety timeouts for robust, reliable embedded applications.
+High-performance `no_std` Rust driver for BME280 sensors. It leverages the Typestate pattern for compile-time safety, supporting both blocking and async (`embedded-hal` 1.0) operations. Features I2C/SPI compatibility and a fluent Builder API for robust, reliable embedded applications.
 
 ## Features
 
 - **Async First**: Native support for `embedded-hal-async` 1.0.
 - **Typestate Safety**: Compile-time enforcement of sensor states (`Sleep`, `Normal`, `Forced`).
 - **Dual Interface**: Seamless support for both I2C and SPI (with automatic CS management).
-- **Robustness**: Built-in configurable safety timeouts for bus operations and a 10ms post-reset OTP reload guard.
+- **Robustness**: A 10ms post-reset OTP reload guard.
 - **Fluent API**: Modern `Bme280Builder` for elegant configuration.
 - **no_std**: Zero-cost abstractions suitable for bare-metal development.
 
@@ -26,7 +26,6 @@ let mut bme = Bme280Builder::new()
     .oversampling_humidity(OsrsH::X1)
     .filter(FilterMode::F4)
     .standby(TsbMode::SB125)
-    .timeout(Duration::from_millis(100))
     .build_i2c(i2c_bus, 0x77);
 
 // Initialize hardware (includes reset and loading OTP calibration registers)

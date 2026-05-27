@@ -9,7 +9,7 @@ default = ["i2c", "async"]
 i2c = []
 spi = []
 async = ["dep:embedded-hal-async"]
-defmt = ["dep:defmt", "embassy-time/defmt"]
+defmt = ["dep:defmt"]
 
 [dependencies]
 thiserror = { version = "2.0", default-features = false }
@@ -19,7 +19,7 @@ bitfield = "0.13.0"
 log = "0.4"
 defmt = { version = "1.0.1", optional = true }
 embassy-futures = "0.1.2"
-embassy-time = { version = ">=0.3, <=0.6" }
+
 
 [dev-dependencies]
 embedded-hal-mock = { version = "0.11", features = [

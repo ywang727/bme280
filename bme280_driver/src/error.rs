@@ -10,8 +10,6 @@ pub enum I2cError {
     Write,
     #[error("Interrupt pin error")]
     Interrupt,
-    #[error("I2C timeout")]
-    Timeout,
 }
 
 #[derive(Debug, Error)]
@@ -24,8 +22,6 @@ pub enum SpiError {
     Write,
     #[error("Interrupt pin error")]
     Interrupt,
-    #[error("SPI timeout")]
-    Timeout,
 }
 
 #[derive(Debug, Error)]
@@ -41,9 +37,6 @@ pub enum Error {
 
     #[error("Calibration data is not available")]
     CalibDataNotAvailable,
-
-    #[error("Measurement timeout")]
-    Timeout,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
